@@ -1,0 +1,292 @@
+const Quiz = require('../models/Quiz');
+const Question = require('../models/Question');
+const Progress = require('../models/Progress');
+
+// @desc    Create new quiz
+// @route   POST /api/quiz/create
+// @access  Private
+exports.createQuiz = async (req, res) => {
+    try {
+        const { quizType, title, subject, topic, year, questionCount = 25 } = req.body;
+        
+        let filter = { isActive: true };
+        if (subject) filter.subject = subject;
+        if (topic) filter.topic = topic;
+        if (year) filter.year = year;
+        
+        // Get random questions
+        const questions = await Question.aggregate([
+            { $match: filter },
+            { $sample: { size: questionCount } },
+            { $project: { 
+                question: 1, 
+                options: 1, 
+                subject: 1, 
+                topic: 1,
+                difficulty: 1,
+                timeToSolve: 1 
+            }}
+        ]);
+        
+        // Create quiz
+        const quiz = await Quiz.create({
+            user: req.user.id,
+            quizType,
+            title: title || `${quizType} Quiz - ${new Date().toLocaleDateString()}`,
+            questions: questions.map(q => ({
+                question: q._id
+            })),
+            totalQuestions: questions.length
+        });
+        
+        res.status(201).json({
+            success: true,
+            quizId: quiz._id,
+            questions: questions.map(q => ({
+                _id: q._id,
+                question: q.question,
+                options: q.options,
+                subject: q.subject,
+                topic: q.topic,
+                difficulty: q.difficulty,
+                timeToSolve: q.timeToSolve
+            }))
+        });
+    } catch (error) {
+        res.status(400).json({
+            success: false,
+            error: error.message
+        });
+    }
+};
+
+// @desc    Submit quiz
+// @route   POST /api/quiz/submit/:id
+// @access  Private
+exports.submitQuiz = async (req, res) => {
+    try {
+        const { answers, timeTaken } = req.body;
+        
+        const quiz = await Quiz.findById(req.params.id);
+        if (!quiz) {
+            return res.status(404).json({
+                success: false,
+                error: 'Quiz not found'
+            });
+        }
+        
+        // Check if already submitted
+        if (quiz.isCompleted) {
+            return res.status(400).json({
+                success: false,
+                error: 'Quiz already submitted'
+            });
+        }
+        
+        // Update quiz with answers
+        let correctCount = 0;
+        const subjectStats = {
+            Mathematics: { correct: 0, total: 0 },
+            Reasoning: { correct: 0, total: 0 },
+            'General Awareness': { correct: 0, total: 0 },
+            'General Science': { correct: 0, total: 0 }
+        };
+        
+        for (const answer of answers) {
+            const question = await Question.findById(answer.questionId);
+            const isCorrect = question.correctAnswer === answer.userAnswer;
+            
+            if (isCorrect) {
+                correctCount++;
+                subjectStats[question.subject].correct++;
+            }
+            
+            subjectStats[question.subject].total++;
+            
+            // Update quiz question
+            const qIndex = quiz.questions.findIndex(
+                q => q.question.toString() === answer.questionId
+            );
+            
+            if (qIndex !== -1) {
+                quiz.questions[qIndex].userAnswer = answer.userAnswer;
+                quiz.questions[qIndex].isCorrect = isCorrect;
+                quiz.questions[qIndex].timeTaken = answer.timeTaken;
+            }
+        }
+        
+        // Calculate subject-wise scores
+        const subjectWiseScore = {};
+        for (const [subject, stats] of Object.entries(subjectStats)) {
+            if (stats.total > 0) {
+                subjectWiseScore[subject] = {
+                    correct: stats.correct,
+                    total: stats.total,
+                    score: (stats.correct / stats.total) * 100
+                };
+            }
+        }
+        
+        // Update quiz
+        quiz.correctAnswers = correctCount;
+        quiz.timeTaken = timeTaken;
+        quiz.subjectWiseScore = subjectWiseScore;
+        quiz.isCompleted = true;
+        quiz.completedAt = new Date();
+        await quiz.save();
+        
+        // Update progress
+        await updateProgress(req.user.id, quiz);
+        
+        res.status(200).json({
+            success: true,
+            score: correctCount,
+            total: quiz.totalQuestions,
+            accuracy: (correctCount / quiz.totalQuestions) * 100,
+            timeTaken,
+            subjectWiseScore
+        });
+    } catch (error) {
+        res.status(400).json({
+            success: false,
+            error: error.message
+        });
+    }
+};
+
+// Helper function to update progress
+async function updateProgress(userId, quiz) {
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+    
+    let progress = await Progress.findOne({
+        user: userId,
+        date: { $gte: today, $lt: new Date(today.getTime() + 24 * 60 * 60 * 1000) }
+    });
+    
+    if (!progress) {
+        progress = await Progress.create({ user: userId });
+    }
+    
+    // Update daily stats
+    progress.dailyStats.questionsAttempted += quiz.totalQuestions;
+    progress.dailyStats.correctAnswers += quiz.correctAnswers;
+    progress.dailyStats.timeSpent += Math.floor(quiz.timeTaken / 60); // Convert to minutes
+    progress.dailyStats.streakMaintained = true;
+    
+    // Update subject stats
+    for (const [subject, stats] of Object.entries(quiz.subjectWiseScore)) {
+        if (stats.total > 0) {
+            progress.subjectStats[subject].questionsAttempted += stats.total;
+            progress.subjectStats[subject].correctAnswers += stats.correct;
+            progress.subjectStats[subject].timeSpent += Math.floor(quiz.timeTaken / 60 / 4); // Approximate
+            
+            const newAccuracy = progress.subjectStats[subject].correctAnswers / 
+                               progress.subjectStats[subject].questionsAttempted * 100;
+            progress.subjectStats[subject].accuracy = newAccuracy;
+        }
+    }
+    
+    // Update overall stats
+    progress.overallStats.totalQuestionsAttempted += quiz.totalQuestions;
+    progress.overallStats.totalCorrectAnswers += quiz.correctAnswers;
+    progress.overallStats.totalTimeSpent += Math.floor(quiz.timeTaken / 60);
+    
+    await progress.save();
+}
+
+// @desc    Get user's quiz history
+// @route   GET /api/quiz/history
+// @access  Private
+exports.getQuizHistory = async (req, res) => {
+    try {
+        const { page = 1, limit = 10, quizType } = req.query;
+        const skip = (page - 1) * limit;
+        
+        let filter = { user: req.user.id, isCompleted: true };
+        if (quizType) filter.quizType = quizType;
+        
+        const quizzes = await Quiz.find(filter)
+            .sort({ completedAt: -1 })
+            .skip(skip)
+            .limit(parseInt(limit))
+            .select('quizType title correctAnswers totalQuestions accuracy timeTaken completedAt');
+        
+        const total = await Quiz.countDocuments(filter);
+        
+        res.status(200).json({
+            success: true,
+            count: quizzes.length,
+            total,
+            pages: Math.ceil(total / limit),
+            data: quizzes
+        });
+    } catch (error) {
+        res.status(400).json({
+            success: false,
+            error: error.message
+        });
+    }
+};
+
+// @desc    Get quiz analytics
+// @route   GET /api/quiz/analytics
+// @access  Private
+exports.getQuizAnalytics = async (req, res) => {
+    try {
+        const userId = req.user.id;
+        
+        // Get overall stats
+        const overallStats = await Quiz.aggregate([
+            { $match: { user: mongoose.Types.ObjectId(userId), isCompleted: true } },
+            { $group: {
+                _id: null,
+                totalQuizzes: { $sum: 1 },
+                totalQuestions: { $sum: '$totalQuestions' },
+                totalCorrect: { $sum: '$correctAnswers' },
+                averageAccuracy: { $avg: '$accuracy' },
+                averageTimePerQuestion: { 
+                    $avg: { $divide: ['$timeTaken', '$totalQuestions'] }
+                },
+                bestScore: { $max: '$accuracy' },
+                recentQuizzes: { $push: '$$ROOT' }
+            }}
+        ]);
+        
+        // Get subject-wise stats
+        const subjectStats = await Quiz.aggregate([
+            { $match: { user: mongoose.Types.ObjectId(userId), isCompleted: true } },
+            { $unwind: '$subjectWiseScore' },
+            { $group: {
+                _id: '$subjectWiseScore.subject',
+                totalQuestions: { $sum: '$subjectWiseScore.total' },
+                totalCorrect: { $sum: '$subjectWiseScore.correct' },
+                averageScore: { $avg: '$subjectWiseScore.score' }
+            }}
+        ]);
+        
+        // Get improvement over time
+        const improvementStats = await Quiz.aggregate([
+            { $match: { user: mongoose.Types.ObjectId(userId), isCompleted: true } },
+            { $sort: { completedAt: 1 } },
+            { $group: {
+                _id: { $dateToString: { format: "%Y-%m", date: "$completedAt" } },
+                averageAccuracy: { $avg: '$accuracy' },
+                quizCount: { $sum: 1 }
+            }},
+            { $sort: { '_id': 1 } }
+        ]);
+        
+        res.status(200).json({
+            success: true,
+            overall: overallStats[0] || {},
+            subjectStats,
+            improvementStats
+        });
+    } catch (error) {
+        res.status(400).json({
+            success: false,
+            error: error.message
+        });
+    }
+};
