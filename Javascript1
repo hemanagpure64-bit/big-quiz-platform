@@ -1,0 +1,75 @@
+const mongoose = require('mongoose');
+
+const quizSchema = new mongoose.Schema({
+    user: {
+        type: mongoose.Schema.Types.ObjectId,
+        ref: 'User',
+        required: true
+    },
+    quizType: {
+        type: String,
+        enum: ['Daily', 'Subject', 'Full Mock', 'Sectional', 'Previous Year'],
+        required: true
+    },
+    title: {
+        type: String,
+        required: true
+    },
+    questions: [{
+        question: {
+            type: mongoose.Schema.Types.ObjectId,
+            ref: 'Question'
+        },
+        userAnswer: Number,
+        isCorrect: Boolean,
+        timeTaken: Number // in seconds
+    }],
+    totalQuestions: {
+        type: Number,
+        required: true
+    },
+    correctAnswers: {
+        type: Number,
+        default: 0
+    },
+    score: {
+        type: Number,
+        default: 0
+    },
+    accuracy: {
+        type: Number,
+        default: 0
+    },
+    timeTaken: {
+        type: Number, // in seconds
+        default: 0
+    },
+    subjectWiseScore: {
+        Mathematics: { correct: Number, total: Number, score: Number },
+        Reasoning: { correct: Number, total: Number, score: Number },
+        'General Awareness': { correct: Number, total: Number, score: Number },
+        'General Science': { correct: Number, total: Number, score: Number }
+    },
+    isCompleted: {
+        type: Boolean,
+        default: false
+    },
+    startedAt: {
+        type: Date,
+        default: Date.now
+    },
+    completedAt: Date
+}, {
+    timestamps: true
+});
+
+// Calculate accuracy before save
+quizSchema.pre('save', function(next) {
+    if (this.totalQuestions > 0) {
+        this.accuracy = (this.correctAnswers / this.totalQuestions) * 100;
+        this.score = this.correctAnswers;
+    }
+    next();
+});
+
+module.exports = mongoose.model('Quiz', quizSchema);
