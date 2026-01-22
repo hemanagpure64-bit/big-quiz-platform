@@ -1,0 +1,25 @@
+rrb-prep-backend/
+├── src/
+│   ├── config/
+│   │   └── database.js
+│   ├── models/
+│   │   ├── Question.js
+│   │   ├── User.js
+│   │   ├── Quiz.js
+│   │   └── Progress.js
+│   ├── controllers/
+│   │   ├── authController.js
+│   │   ├── questionController.js
+│   │   ├── quizController.js
+│   │   └── progressController.js
+│   ├── routes/
+│   │   ├── authRoutes.js
+│   │   ├── questionRoutes.js
+│   │   ├── quizRoutes.js
+│   │   └── progressRoutes.js
+│   ├── middleware/
+│   │   └── auth.js
+│   └── app.js
+├── .env
+├── package.json
+└── server.js
