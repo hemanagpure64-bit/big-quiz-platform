@@ -1,0 +1,100 @@
+const mongoose = require('mongoose');
+
+const questionSchema = new mongoose.Schema({
+    question: {
+        type: String,
+        required: [true, 'Please add question text'],
+        trim: true
+    },
+    options: {
+        type: [String],
+        required: [true, 'Please add options'],
+        validate: {
+            validator: function(arr) {
+                return arr.length === 4;
+            },
+            message: 'There must be exactly 4 options'
+        }
+    },
+    correctAnswer: {
+        type: Number,
+        required: [true, 'Please specify correct answer index (0-3)'],
+        min: 0,
+        max: 3
+    },
+    explanation: {
+        type: String,
+        required: [true, 'Please add explanation']
+    },
+    subject: {
+        type: String,
+        required: [true, 'Please specify subject'],
+        enum: ['Mathematics', 'Reasoning', 'General Awareness', 'General Science']
+    },
+    topic: {
+        type: String,
+        required: [true, 'Please specify topic']
+    },
+    subTopic: {
+        type: String
+    },
+    year: {
+        type: Number,
+        required: [true, 'Please specify year'],
+        min: 2014,
+        max: new Date().getFullYear()
+    },
+    difficulty: {
+        type: String,
+        enum: ['Easy', 'Medium', 'Hard'],
+        default: 'Medium'
+    },
+    timeToSolve: {
+        type: Number, // in seconds
+        default: 60
+    },
+    tags: [String],
+    source: {
+        type: String,
+        enum: ['Previous Year', 'Mock Test', 'Practice Set']
+    },
+    attempts: {
+        type: Number,
+        default: 0
+    },
+    correctAttempts: {
+        type: Number,
+        default: 0
+    },
+    accuracy: {
+        type: Number,
+        default: 0
+    },
+    isActive: {
+        type: Boolean,
+        default: true
+    },
+    createdAt: {
+        type: Date,
+        default: Date.now
+    }
+}, {
+    toJSON: { virtuals: true },
+    toObject: { virtuals: true }
+});
+
+// Indexes for faster queries
+questionSchema.index({ subject: 1, topic: 1 });
+questionSchema.index({ year: 1 });
+questionSchema.index({ difficulty: 1 });
+questionSchema.index({ tags: 1 });
+
+// Calculate accuracy before save
+questionSchema.pre('save', function(next) {
+    if (this.attempts > 0) {
+        this.accuracy = (this.correctAttempts / this.attempts) * 100;
+    }
+    next();
+});
+
+module.exports = mongoose.model('Question', questionSchema);
