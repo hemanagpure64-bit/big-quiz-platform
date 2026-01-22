@@ -1,0 +1,288 @@
+const Progress = require('../models/Progress');
+const User = require('../models/User');
+
+// @desc    Get user progress
+// @route   GET /api/progress
+// @access  Private
+exports.getProgress = async (req, res) => {
+    try {
+        const today = new Date();
+        today.setHours(0, 0, 0, 0);
+        
+        // Get today's progress
+        const todayProgress = await Progress.findOne({
+            user: req.user.id,
+            date: { $gte: today, $lt: new Date(today.getTime() + 24 * 60 * 60 * 1000) }
+        });
+        
+        // Get last 7 days progress
+        const weekAgo = new Date(today.getTime() - 7 * 24 * 60 * 60 * 1000);
+        const weeklyProgress = await Progress.find({
+            user: req.user.id,
+            date: { $gte: weekAgo }
+        }).sort({ date: 1 });
+        
+        // Calculate weekly stats
+        const weeklyStats = {
+            totalQuestions: weeklyProgress.reduce((sum, p) => sum + p.dailyStats.questionsAttempted, 0),
+            totalCorrect: weeklyProgress.reduce((sum, p) => sum + p.dailyStats.correctAnswers, 0),
+            totalTime: weeklyProgress.reduce((sum, p) => sum + p.dailyStats.timeSpent, 0),
+            streakDays: weeklyProgress.filter(p => p.dailyStats.streakMaintained).length
+        };
+        
+        // Get weak topics (accuracy < 60%)
+        const weakTopics = todayProgress ? 
+            todayProgress.weakTopics.filter(topic => topic.accuracy < 60) : [];
+        
+        // Get strong topics (accuracy > 80%)
+        const strongTopics = todayProgress ? 
+            todayProgress.strongTopics.filter(topic => topic.accuracy > 80) : [];
+        
+        res.status(200).json({
+            success: true,
+            today: todayProgress || {
+                dailyStats: { questionsAttempted: 0, correctAnswers: 0, timeSpent: 0 }
+            },
+            weekly: weeklyStats,
+            weakTopics,
+            strongTopics,
+            weeklyChart: weeklyProgress.map(p => ({
+                date: p.date,
+                accuracy: p.dailyStats.questionsAttempted > 0 ?
+                    (p.dailyStats.correctAnswers / p.dailyStats.questionsAttempted) * 100 : 0,
+                questions: p.dailyStats.questionsAttempted
+            }))
+        });
+    } catch (error) {
+        res.status(400).json({
+            success: false,
+            error: error.message
+        });
+    }
+};
+
+// @desc    Get leaderboard
+// @route   GET /api/progress/leaderboard
+// @access  Private
+exports.getLeaderboard = async (req, res) => {
+    try {
+        const { timeframe = 'weekly', limit = 50 } = req.query;
+        
+        let startDate;
+        const today = new Date();
+        
+        switch(timeframe) {
+            case 'daily':
+                startDate = new Date(today.setHours(0, 0, 0, 0));
+                break;
+            case 'weekly':
+                startDate = new Date(today.getTime() - 7 * 24 * 60 * 60 * 1000);
+                break;
+            case 'monthly':
+                startDate = new Date(today.getFullYear(), today.getMonth(), 1);
+                break;
+            default:
+                startDate = new Date(today.getTime() - 7 * 24 * 60 * 60 * 1000);
+        }
+        
+        const leaderboard = await Progress.aggregate([
+            { $match: { date: { $gte: startDate } } },
+            { $group: {
+                _id: '$user',
+                totalQuestions: { $sum: '$dailyStats.questionsAttempted' },
+                totalCorrect: { $sum: '$dailyStats.correctAnswers' },
+                totalTime: { $sum: '$dailyStats.timeSpent' },
+                streakDays: { 
+                    $sum: { $cond: ['$dailyStats.streakMaintained', 1, 0] }
+                }
+            }},
+            { $lookup: {
+                from: 'users',
+                localField: '_id',
+                foreignField: '_id',
+                as: 'userInfo'
+            }},
+            { $unwind: '$userInfo' },
+            { $project: {
+                userId: '$_id',
+                name: '$userInfo.name',
+                email: '$userInfo.email',
+                totalQuestions: 1,
+                totalCorrect: 1,
+                totalTime: 1,
+                streakDays: 1,
+                accuracy: {
+                    $cond: [
+                        { $eq: ['$totalQuestions', 0] },
+                        0,
+                        { $multiply: [{ $divide: ['$totalCorrect', '$totalQuestions'] }, 100] }
+                    ]
+                }
+            }},
+            { $sort: { accuracy: -1, totalQuestions: -1 } },
+            { $limit: parseInt(limit) }
+        ]);
+        
+        // Add rank
+        const leaderboardWithRank = leaderboard.map((user, index) => ({
+            rank: index + 1,
+            ...user
+        }));
+        
+        // Get current user's rank
+        const currentUserIndex = leaderboardWithRank.findIndex(
+            user => user.userId.toString() === req.user.id
+        );
+        const currentUserRank = currentUserIndex !== -1 ? currentUserIndex + 1 : null;
+        
+        res.status(200).json({
+            success: true,
+            timeframe,
+            currentUserRank,
+            leaderboard: leaderboardWithRank
+        });
+    } catch (error) {
+        res.status(400).json({
+            success: false,
+            error: error.message
+        });
+    }
+};
+
+// @desc    Get progress insights
+// @route   GET /api/progress/insights
+// @access  Private
+exports.getProgressInsights = async (req, res) => {
+    try {
+        const userId = req.user.id;
+        
+        // Get user's progress data
+        const progressData = await Progress.find({ user: userId })
+            .sort({ date: -1 })
+            .limit(30);
+        
+        if (progressData.length === 0) {
+            return res.status(200).json({
+                success: true,
+                insights: [],
+                recommendations: [
+                    "Start attempting daily quizzes to build your streak",
+                    "Aim for at least 25 questions per day",
+                    "Focus on accuracy over speed initially"
+                ]
+            });
+        }
+        
+        // Calculate insights
+        const insights = [];
+        const recommendations = [];
+        
+        // 1. Daily average
+        const totalQuestions = progressData.reduce((sum, p) => 
+            sum + p.dailyStats.questionsAttempted, 0);
+        const dailyAverage = totalQuestions / progressData.length;
+        
+        insights.push({
+            type: 'performance',
+            title: 'Daily Average',
+            value: Math.round(dailyAverage),
+            target: 25,
+            status: dailyAverage >= 25 ? 'good' : 'needs_improvement'
+        });
+        
+        if (dailyAverage < 25) {
+            recommendations.push("Try to reach 25 questions daily to meet your goal");
+        }
+        
+        // 2. Accuracy trend
+        const accuracyData = progressData.map(p => ({
+            date: p.date,
+            accuracy: p.dailyStats.questionsAttempted > 0 ?
+                (p.dailyStats.correctAnswers / p.dailyStats.questionsAttempted) * 100 : 0
+        }));
+        
+        const recentAccuracy = accuracyData.slice(0, 7).reduce((sum, a) => sum + a.accuracy, 0) / 7;
+        const olderAccuracy = accuracyData.length > 7 ?
+            accuracyData.slice(7).reduce((sum, a) => sum + a.accuracy, 0) / (accuracyData.length - 7) : recentAccuracy;
+        
+        const accuracyTrend = recentAccuracy - olderAccuracy;
+        
+        insights.push({
+            type: 'trend',
+            title: 'Accuracy Trend',
+            value: accuracyTrend.toFixed(1),
+            unit: '% change',
+            status: accuracyTrend > 0 ? 'improving' : 'declining'
+        });
+        
+        if (accuracyTrend < 0) {
+            recommendations.push("Review incorrect answers to understand mistakes");
+        }
+        
+        // 3. Weakest subject
+        const subjectStats = {};
+        progressData.forEach(p => {
+            Object.entries(p.subjectStats).forEach(([subject, stats]) => {
+                if (!subjectStats[subject]) {
+                    subjectStats[subject] = { attempted: 0, correct: 0 };
+                }
+                subjectStats[subject].attempted += stats.questionsAttempted;
+                subjectStats[subject].correct += stats.correctAnswers;
+            });
+        });
+        
+        let weakestSubject = null;
+        let lowestAccuracy = 100;
+        
+        for (const [subject, stats] of Object.entries(subjectStats)) {
+            if (stats.attempted > 10) {
+                const accuracy = (stats.correct / stats.attempted) * 100;
+                if (accuracy < lowestAccuracy) {
+                    lowestAccuracy = accuracy;
+                    weakestSubject = subject;
+                }
+            }
+        }
+        
+        if (weakestSubject) {
+            insights.push({
+                type: 'weakness',
+                title: 'Focus Area',
+                value: weakestSubject,
+                accuracy: lowestAccuracy.toFixed(1),
+                status: 'needs_attention'
+            });
+            
+            recommendations.push(`Spend more time on ${weakestSubject} practice`);
+        }
+        
+        // 4. Time management
+        const totalTime = progressData.reduce((sum, p) => 
+            sum + p.dailyStats.timeSpent, 0);
+        const avgTimePerQuestion = totalTime * 60 / totalQuestions; // in seconds
+        
+        insights.push({
+            type: 'time',
+            title: 'Avg Time/Question',
+            value: avgTimePerQuestion.toFixed(1),
+            unit: 'seconds',
+            target: 60,
+            status: avgTimePerQuestion <= 60 ? 'good' : 'needs_improvement'
+        });
+        
+        if (avgTimePerQuestion > 60) {
+            recommendations.push("Practice speed tests to improve time management");
+        }
+        
+        res.status(200).json({
+            success: true,
+            insights,
+            recommendations
+        });
+    } catch (error) {
+        res.status(400).json({
+            success: false,
+            error: error.message
+        });
+    }
+};
