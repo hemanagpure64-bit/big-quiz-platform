@@ -1,0 +1,11 @@
+# Initialize project
+mkdir rrb-prep-backend
+cd rrb-prep-backend
+npm init -y
+
+# Install dependencies
+npm install express mongoose bcryptjs jsonwebtoken cors dotenv
+npm install -D nodemon
+
+# Install for testing
+npm install jest supertest
