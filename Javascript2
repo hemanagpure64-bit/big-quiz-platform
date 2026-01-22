@@ -1,0 +1,78 @@
+const mongoose = require('mongoose');
+
+const progressSchema = new mongoose.Schema({
+    user: {
+        type: mongoose.Schema.Types.ObjectId,
+        ref: 'User',
+        required: true
+    },
+    date: {
+        type: Date,
+        default: Date.now
+    },
+    dailyStats: {
+        questionsAttempted: { type: Number, default: 0 },
+        correctAnswers: { type: Number, default: 0 },
+        timeSpent: { type: Number, default: 0 }, // in minutes
+        streakMaintained: { type: Boolean, default: false }
+    },
+    subjectStats: {
+        Mathematics: {
+            questionsAttempted: { type: Number, default: 0 },
+            correctAnswers: { type: Number, default: 0 },
+            accuracy: { type: Number, default: 0 },
+            timeSpent: { type: Number, default: 0 }
+        },
+        Reasoning: {
+            questionsAttempted: { type: Number, default: 0 },
+            correctAnswers: { type: Number, default: 0 },
+            accuracy: { type: Number, default: 0 },
+            timeSpent: { type: Number, default: 0 }
+        },
+        'General Awareness': {
+            questionsAttempted: { type: Number, default: 0 },
+            correctAnswers: { type: Number, default: 0 },
+            accuracy: { type: Number, default: 0 },
+            timeSpent: { type: Number, default: 0 }
+        },
+        'General Science': {
+            questionsAttempted: { type: Number, default: 0 },
+            correctAnswers: { type: Number, default: 0 },
+            accuracy: { type: Number, default: 0 },
+            timeSpent: { type: Number, default: 0 }
+        }
+    },
+    weakTopics: [{
+        subject: String,
+        topic: String,
+        accuracy: Number,
+        totalAttempts: Number
+    }],
+    strongTopics: [{
+        subject: String,
+        topic: String,
+        accuracy: Number,
+        totalAttempts: Number
+    }],
+    overallStats: {
+        totalQuestionsAttempted: { type: Number, default: 0 },
+        totalCorrectAnswers: { type: Number, default: 0 },
+        overallAccuracy: { type: Number, default: 0 },
+        totalTimeSpent: { type: Number, default: 0 },
+        currentRank: { type: Number },
+        rankImprovement: { type: Number }
+    }
+}, {
+    timestamps: true
+});
+
+// Calculate overall accuracy before save
+progressSchema.pre('save', function(next) {
+    if (this.overallStats.totalQuestionsAttempted > 0) {
+        this.overallStats.overallAccuracy = 
+            (this.overallStats.totalCorrectAnswers / this.overallStats.totalQuestionsAttempted) * 100;
+    }
+    next();
+});
+
+module.exports = mongoose.model('Progress', progressSchema);
