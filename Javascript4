@@ -1,0 +1,215 @@
+const Question = require('../models/Question');
+
+// @desc    Get all questions with filters
+// @route   GET /api/questions
+// @access  Private
+exports.getQuestions = async (req, res) => {
+    try {
+        const { subject, topic, year, difficulty, limit = 25, page = 1 } = req.query;
+        
+        // Build filter object
+        let filter = { isActive: true };
+        if (subject) filter.subject = subject;
+        if (topic) filter.topic = topic;
+        if (year) filter.year = year;
+        if (difficulty) filter.difficulty = difficulty;
+
+        // Pagination
+        const skip = (page - 1) * limit;
+        
+        // Execute query
+        const questions = await Question.find(filter)
+            .skip(skip)
+            .limit(parseInt(limit))
+            .select('-correctAnswer');
+
+        const total = await Question.countDocuments(filter);
+
+        res.status(200).json({
+            success: true,
+            count: questions.length,
+            total,
+            pages: Math.ceil(total / limit),
+            data: questions
+        });
+    } catch (error) {
+        res.status(400).json({
+            success: false,
+            error: error.message
+        });
+    }
+};
+
+// @desc    Get daily quiz questions
+// @route   GET /api/questions/daily
+// @access  Private
+exports.getDailyQuiz = async (req, res) => {
+    try {
+        const today = new Date();
+        const seed = today.getFullYear() * 10000 + (today.getMonth() + 1) * 100 + today.getDate();
+        
+        // Use seed for reproducible random selection
+        const subjects = ['Mathematics', 'Reasoning', 'General Awareness', 'General Science'];
+        const questions = [];
+        
+        // Get 6-7 questions from each subject
+        for (const subject of subjects) {
+            const subjectQuestions = await Question.aggregate([
+                { $match: { subject, isActive: true } },
+                { $sample: { size: 7 } },
+                { $project: { 
+                    question: 1, 
+                    options: 1, 
+                    subject: 1, 
+                    topic: 1,
+                    difficulty: 1,
+                    timeToSolve: 1 
+                }}
+            ]);
+            questions.push(...subjectQuestions);
+        }
+        
+        // Shuffle using seed-based algorithm
+        function seededShuffle(array, seed) {
+            let m = array.length, t, i;
+            while (m) {
+                i = Math.floor(random(seed) * m--);
+                t = array[m];
+                array[m] = array[i];
+                array[i] = t;
+                ++seed;
+            }
+            return array;
+        }
+        
+        function random(seed) {
+            const x = Math.sin(seed++) * 10000;
+            return x - Math.floor(x);
+        }
+        
+        const shuffledQuestions = seededShuffle(questions, seed).slice(0, 25);
+        
+        res.status(200).json({
+            success: true,
+            date: today.toISOString().split('T')[0],
+            questions: shuffledQuestions,
+            timeLimit: 1800 // 30 minutes in seconds
+        });
+    } catch (error) {
+        res.status(400).json({
+            success: false,
+            error: error.message
+        });
+    }
+};
+
+// @desc    Check answers
+// @route   POST /api/questions/check
+// @access  Private
+exports.checkAnswers = async (req, res) => {
+    try {
+        const { answers } = req.body; // Array of { questionId, userAnswer }
+        
+        const questionIds = answers.map(a => a.questionId);
+        const questions = await Question.find({ _id: { $in: questionIds } });
+        
+        const results = answers.map(answer => {
+            const question = questions.find(q => q._id.toString() === answer.questionId);
+            const isCorrect = question.correctAnswer === answer.userAnswer;
+            
+            // Update question stats
+            Question.findByIdAndUpdate(answer.questionId, {
+                $inc: { 
+                    attempts: 1,
+                    correctAttempts: isCorrect ? 1 : 0
+                }
+            }).exec();
+            
+            return {
+                questionId: answer.questionId,
+                userAnswer: answer.userAnswer,
+                correctAnswer: question.correctAnswer,
+                isCorrect,
+                explanation: question.explanation
+            };
+        });
+        
+        const correctCount = results.filter(r => r.isCorrect).length;
+        const accuracy = (correctCount / results.length) * 100;
+        
+        res.status(200).json({
+            success: true,
+            totalQuestions: results.length,
+            correctAnswers: correctCount,
+            accuracy: accuracy.toFixed(2),
+            results
+        });
+    } catch (error) {
+        res.status(400).json({
+            success: false,
+            error: error.message
+        });
+    }
+};
+
+// @desc    Get question by ID
+// @route   GET /api/questions/:id
+// @access  Private
+exports.getQuestion = async (req, res) => {
+    try {
+        const question = await Question.findById(req.params.id);
+        
+        if (!question) {
+            return res.status(404).json({
+                success: false,
+                error: 'Question not found'
+            });
+        }
+        
+        res.status(200).json({
+            success: true,
+            data: question
+        });
+    } catch (error) {
+        res.status(400).json({
+            success: false,
+            error: error.message
+        });
+    }
+};
+
+// @desc    Get question statistics
+// @route   GET /api/questions/stats
+// @access  Private
+exports.getQuestionStats = async (req, res) => {
+    try {
+        const stats = await Question.aggregate([
+            { $match: { isActive: true } },
+            { $group: {
+                _id: '$subject',
+                totalQuestions: { $sum: 1 },
+                averageAccuracy: { $avg: '$accuracy' },
+                easyQuestions: { 
+                    $sum: { $cond: [{ $eq: ['$difficulty', 'Easy'] }, 1, 0] }
+                },
+                mediumQuestions: { 
+                    $sum: { $cond: [{ $eq: ['$difficulty', 'Medium'] }, 1, 0] }
+                },
+                hardQuestions: { 
+                    $sum: { $cond: [{ $eq: ['$difficulty', 'Hard'] }, 1, 0] }
+                }
+            }},
+            { $sort: { _id: 1 } }
+        ]);
+        
+        res.status(200).json({
+            success: true,
+            data: stats
+        });
+    } catch (error) {
+        res.status(400).json({
+            success: false,
+            error: error.message
+        });
+    }
+};
